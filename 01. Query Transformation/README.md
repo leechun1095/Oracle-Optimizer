@@ -735,3 +735,220 @@ Predicate Information (identified by operation id):
   11 - access("D"."DEPARTMENT_NAME"='Shipping')
   12 - filter(("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND "D"."LOCATION_ID"="L"."LOCATION_ID"))
 ```
+
+## Global Hint 는 위험한가 ?
+* SQL을 다시 실행할 경우 쿼리블럭이 바뀌지 않을까하는 걱정 ? ( Global Hint,쿼리블록 표기법)
+* 쿼리블럭이 변경 되는 경우는 1) SQL 이 변경되거나, 2)통계정보 등이 변경되어 Plan 이 변경되는 경우, 이 경우는 일반적인 힌트도 적용 되지 않는다. 
+* 고로 Global Hint 쿼리블록 표기법이 특별히 더 위험하지 않다.
+
+## 10053 이벤트 내용 순서
+```sql
+1) DBMS 정보, OS 정보, 하드웨어 정보 그리고 SQL 을 실행한 Client 정보
+2) 쿼리블럭 정보와 수행된 SQL을 Parse 로 부터 받아서 출력한다.
+3) 10053 Event 에서 사용될 용어 출력
+4) Optimizer 에 관련된 성능 파라미터를 출력, Bug Fix Control 정보 출력
+   Default 값을 기본적으로 출력하되, 수정된 파라미터가 있을 경우 따로 출력
+   SQL 에서 opt_param 힌트를 사용 시, 따로 출력
+5) Heuristic Query Transformation(이하 HQT)과정 출력
+6) Bind Peeking 이 수행
+7) Cost Based Query Transformation(이하 CBQT)과정 출력
+   연이어 HQT 혹은 CBQT 로 인해 신규로 생성된 쿼리블럭 정보 출력
+8) 시스템 통계정보와 테이블과 인덱스의 통계정보 출력
+9) 테이블 단위로 최적의 Access Path 와 Cost 출력
+10) 최적의 조인방법과 조인순서 정함
+11) SQL Dump 와 Explain Plan Dump 를 수행 하여 SQL과 실행계획을 출력
+12) 마지막으로 Optimizer state dump 와 Hint dump 를 수행하여 SQL 이 수행되었던
+    당시의 옵티마이져 관련 파라미터 정보, Bug Fix Control, 최종 적용된 힌트 정보 출력
+
+-- Query Transformation : 5번과 7번
+-- Physical Transformation : 9번과 10번
+```
+
+## 10053 Event Trace
+```sql
+ALTER SESSION SET optimizer_mode = first_rows_1;
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1'; -- Trace 생성시작
+
+SELECT /*+ QB_NAME(main) */
+       department_id, department_name, manager_id, location_id
+  FROM department d
+ WHERE EXISTS (SELECT /*+ QB_NAME(sub) */
+                      NULL
+                 FROM employee e
+                WHERE e.department_id = d.department_id 
+                  AND e.email = :v_email1);
+       
+ALTER SESSION SET EVENTS '10053 trace name context off';  -- Trace 생성 종료
+```
+
+#### trace 내용 중 중요한 부분
+```sql
+-- 5.Heuristic Query Transformation 과정이 출력된다.
+Considering Query Transformations on query block MAIN (#0)
+**************************
+Query transformations (QT)
+**************************
+JF: Checking validity of join factorization for query block SUB (#0)
+JF: Bypassed: not a UNION or UNION-ALL query block.
+ST: not valid since star transformation parameter is FALSE
+TE: Checking validity of table expansion for query block SUB (#0)
+TE: Bypassed: No partitioned table in query block.
+CBQT: Validity checks passed for cr4dmgd411hum.
+CSE: Considering common sub-expression elimination in query block MAIN (#0)
+*************************
+Common Subexpression elimination (CSE)
+*************************
+CSE: Considering common sub-expression elimination in query block SUB (#0)
+*************************
+Common Subexpression elimination (CSE)
+*************************
+CSE:     CSE not performed on query block SUB (#0).
+CSE:     CSE not performed on query block MAIN (#0).
+OBYE:   Considering Order-by Elimination from view MAIN (#0)
+***************************
+Order-by elimination (OBYE)
+***************************
+OBYE:     OBYE bypassed: no order by to eliminate.
+query block MAIN (#0) unchanged
+Considering Query Transformations on query block MAIN (#0)
+**************************
+Query transformations (QT)
+**************************
+CSE: Considering common sub-expression elimination in query block MAIN (#0)
+*************************
+Common Subexpression elimination (CSE)
+*************************
+CSE: Considering common sub-expression elimination in query block SUB (#0)
+*************************
+Common Subexpression elimination (CSE)
+*************************
+CSE:     CSE not performed on query block SUB (#0).
+CSE:     CSE not performed on query block MAIN (#0).
+query block MAIN (#0) unchanged
+apadrv-start sqlid=14668702803393823571
+  :
+    call(in-use=1704, alloc=16344), compile(in-use=69896, alloc=70888), execution(in-use=3832, alloc=4032)
+```
+
+```sql
+-- 7. Cost Based Query Transformation 과정이 출력된다.
+CBQT: Considering cost-based transformation on query block MAIN (#0)
+********************************
+COST-BASED QUERY TRANSFORMATIONS
+********************************
+FPD: Considering simple filter push (pre rewrite) in query block SUB (#0)
+FPD:  Current where clause predicates "E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND "E"."EMAIL"=:B1
+
+FPD: Considering simple filter push (pre rewrite) in query block MAIN (#0)
+FPD:  Current where clause predicates  EXISTS (SELECT /*+ QB_NAME ("SUB") */ NULL FROM "EMPLOYEE" "E")
+
+OBYE:   Considering Order-by Elimination from view MAIN (#0)
+***************************
+Order-by elimination (OBYE)
+***************************
+OBYE:     OBYE bypassed: no order by to eliminate.
+Considering Query Transformations on query block MAIN (#0)
+**************************
+Query transformations (QT)
+**************************
+CSE: Considering common sub-expression elimination in query block MAIN (#0)
+*************************
+Common Subexpression elimination (CSE)
+*************************
+CSE: Considering common sub-expression elimination in query block SUB (#0)
+*************************
+Common Subexpression elimination (CSE)
+*************************
+CSE:     CSE not performed on query block SUB (#0).
+CSE:     CSE not performed on query block MAIN (#0).
+kkqctdrvTD-start on query block MAIN (#0)
+kkqctdrvTD-start: :
+    call(in-use=1720, alloc=16344), compile(in-use=112344, alloc=114608), execution(in-use=3952, alloc=4032)
+
+Registered qb: MAIN 0x1e5b8f68 (COPY MAIN)
+---------------------
+QUERY BLOCK SIGNATURE
+---------------------
+  signature(): NULL
+Registered qb: SUB 0x1e5b8608 (COPY SUB)
+---------------------
+QUERY BLOCK SIGNATURE
+---------------------
+  signature(): NULL
+*****************************	-- 여기서 서브쿼리가 조인으로 변경되는 작업이 수행된다.
+Cost-Based Subquery Unnesting	-- 이것을 Subquery Unnesting 이라고 부른다.
+*****************************
+SU: Unnesting query blocks in query block MAIN (#1) that are valid to unnest.
+Subquery Unnesting on query block MAIN (#1)SU: Performing unnesting that does not require costing.
+SU: Considering subquery unnest on query block MAIN (#1).
+SU:   Checking validity of unnesting subquery SUB (#2)
+SU:   Passed validity checks.
+SU:   Transforming EXISTS subquery to a join.		-- 서브쿼리가 조인으로 바뀐 것을 알 수 있다.
+Registered qb: SEL$526A7031 0x1e5b8f68 (SUBQUERY UNNEST MAIN; SUB)
+---------------------
+QUERY BLOCK SIGNATURE				-- 새로 생성된 쿼리블럭의 구조를 보여준다.
+---------------------
+  signature (): qb_name=SEL$526A7031 nbfros=2 flg=0
+    fro(0): flg=0 objn=95044 hint_alias="D"@"MAIN"
+    fro(1): flg=0 objn=95046 hint_alias="E"@"SUB" 	-- 쿼리블럭 SUB가 Unnesting 되어 쿼리블럭 SEL$526A7031에 통합되었다.  
+
+*******************************
+Cost-Based Complex View Merging
+*******************************
+CVM: Finding query blocks in query block SEL$526A7031 (#1) that are valid to merge.
+kkqctdrvTD-cleanup: transform(in-use=8888, alloc=12568) :
+    call(in-use=22400, alloc=32712), compile(in-use=133528, alloc=147864), execution(in-use=3992, alloc=8088)
+
+kkqctdrvTD-end:
+    call(in-use=22400, alloc=32712), compile(in-use=121136, alloc=147864), execution(in-use=3992, alloc=8088)
+
+-- (중간 생략)
+
+JPPD:  Considering Cost-based predicate pushdown from query block SEL$526A7031 (#1)
+************************************
+Cost-based predicate pushdown (JPPD)
+************************************
+kkqctdrvTD-start on query block SEL$526A7031 (#1)
+kkqctdrvTD-start: :
+    call(in-use=22856, alloc=49080), compile(in-use=125600, alloc=147864), execution(in-use=4032, alloc=8088)
+
+kkqctdrvTD-cleanup: transform(in-use=0, alloc=0) :
+    call(in-use=22856, alloc=49080), compile(in-use=126248, alloc=147864), execution(in-use=4032, alloc=8088)
+
+kkqctdrvTD-end:
+    call(in-use=22856, alloc=49080), compile(in-use=126608, alloc=147864), execution(in-use=4032, alloc=8088)
+
+JPPD: Applying transformation directives
+query block MAIN transformed to SEL$526A7031 (#1)
+FPD: Considering simple filter push in query block SEL$526A7031 (#1)
+"E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND SYS_OP_C2C("E"."EMAIL")=:B1
+try to generate transitive predicate from check constraints for query block SEL$526A7031 (#1)
+finally: "E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND SYS_OP_C2C("E"."EMAIL")=:B1
+
+Final query after transformations:
+*************************
+First K Rows: Setup begin
+kkoqbc: optimizing query block SEL$526A7031 (#1)
+        
+        :
+    call(in-use=23064, alloc=49080), compile(in-use=133872, alloc=147864), execution(in-use=4368, alloc=8088)
+
+kkoqbc-subheap (create addr=0x000000001E5BD670)
+****************
+QUERY BLOCK TEXT
+****************
+SELECT /*+ QB_NAME(main) */
+       department_id, department_name, manager_id, location_id
+  FROM department d
+ WHERE EXISTS (SELECT /*+ QB_NAME(sub) */
+                      NULL
+                 FROM employee e
+                WHERE e.department_id = d.d
+-- 최종적으로 완성된 쿼리블럭 정보가 출력된다.
+---------------------
+QUERY BLOCK SIGNATURE -- 쿼리블럭 SEL$526A7031이 생성되었고 쿼리블럭 MAIN과 SUB가 통합되었다.
+---------------------
+signature (optimizer): qb_name=SEL$526A7031 nbfros=2 flg=0
+  fro(0): flg=0 objn=95044 hint_alias="D"@"MAIN"
+  fro(1): flg=0 objn=95046 hint_alias="E"@"SUB"
+```
