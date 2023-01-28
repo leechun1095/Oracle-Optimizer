@@ -765,6 +765,8 @@ Predicate Information (identified by operation id):
 ```
 
 ## 10053 Event Trace
+#### Orange 사용중인 경우 
+* Tools - Database Information - Session Parameter - user_dump_dest 경로에 trace 파일이 생성된다
 ```sql
 ALTER SESSION SET optimizer_mode = first_rows_1;
 ALTER SESSION SET EVENTS '10053 trace name context forever, level 1'; -- Trace 생성시작
