@@ -544,7 +544,7 @@ Predicate Information (identified by operation id):
 
 </br>
 
-## OBYE (Order By Elimination)
+## 2.5 OBYE (Order By Elimination)
 #### 불필요한 Order By를 삭제하라
 * Order by 가 필요없는 경우에 OBYE 가 발생된다.
 * JOB_ID = 'ST_CLERK' 조건을 만족하는 데이터를 DEPARTMENT_ID 로 Group By 하여 count 하는 쿼리
@@ -840,7 +840,7 @@ Predicate Information (identified by operation id):
 * DE는 10.2.0.4 에서도 수행되나, _optimizer_distinct_elimination 파라미터가 없는 것이 11g와 다른 점이다.
 
 </br>
-## CNT (Count(column) To Count(*))
+## 2.7 CNT (Count(column) To Count(*))
 #### Count(컬럼) 사용시 해당 컬럼이 Not Null인 경우 Count( * )로 대체하라
 * CNT 기능 : Not Null 컬럼임에도 Count(컬럼) 을 사용하는 경우가 있는데, Logical OPtimizer는 Count( * ) 를 SQL로 바꾼다.
 ```sql
