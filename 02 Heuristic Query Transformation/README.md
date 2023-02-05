@@ -541,3 +541,132 @@ Predicate Information (identified by operation id):
    2 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
    5 - access(ROWID=ROWID)   
 ```
+
+</br>
+
+## OBYE (Order By Elimination)
+#### 불필요한 Order By를 삭제하라
+* Order by 가 필요없는 경우에 OBYE 가 발생된다.
+* JOB_ID = 'ST_CLERK' 조건을 만족하는 데이터를 DEPARTMENT_ID 로 Group By 하여 count 하는 쿼리
+```sql
+ALTER SESSION SET optimizer_mode = first_rows_1;
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1';
+
+SELECT /*+ GATHER_PLAN_STATISTICS */ E.DEPARTMENT_ID, COUNT (*) CNT
+  FROM EMPLOYEE E,
+       (SELECT D.DEPARTMENT_ID, D.DEPARTMENT_NAME
+          FROM DEPARTMENT D
+         ORDER BY D.DEPARTMENT_ID) D
+ WHERE E.DEPARTMENT_ID = D.DEPARTMENT_ID 
+   AND E.JOB_ID = 'ST_CLERK'
+ GROUP BY E.DEPARTMENT_ID;
+
+
+ALTER SESSION SET EVENTS '10053 trace name context off';
+
+SELECT * FROM 
+TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL,NULL, 'allstats last -rows +alias +outline +predicate'));
+```
+* 실행계획으로 보면 Sort Order By 가 존재하지 않음
+* 오라클이 Order by 절을 삭제하기 위한 힌트를 사용하였다 > ELIMINATE_OBY(@"SEL$2")
+```sql
+PLAN_TABLE_OUTPUT
+----------------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name              | Starts | A-Rows |   A-Time   | Buffers |
+----------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |                   |      1 |      1 |00:00:00.01 |      13 |
+|   1 |  SORT GROUP BY NOSORT         |                   |      1 |      1 |00:00:00.01 |      13 |
+|   2 |   NESTED LOOPS                |                   |      1 |     20 |00:00:00.01 |      13 |
+|   3 |    NESTED LOOPS               |                   |      1 |    106 |00:00:00.01 |       4 |
+|   4 |     INDEX FULL SCAN           | DEPT_ID_PK        |      1 |     27 |00:00:00.01 |       1 |
+|*  5 |     INDEX RANGE SCAN          | EMP_DEPARTMENT_IX |     27 |    106 |00:00:00.01 |       3 |
+|*  6 |    TABLE ACCESS BY INDEX ROWID| EMPLOYEE          |    106 |     20 |00:00:00.01 |       9 |
+----------------------------------------------------------------------------------------------------
+ 
+Query Block Name / Object Alias (identified by operation id):
+-------------------------------------------------------------
+ 
+   1 - SEL$51F12574
+   4 - SEL$51F12574 / D@SEL$2
+   5 - SEL$51F12574 / E@SEL$1
+   6 - SEL$51F12574 / E@SEL$1
+ 
+Outline Data
+-------------
+ 
+  /*+
+      BEGIN_OUTLINE_DATA
+      IGNORE_OPTIM_EMBEDDED_HINTS
+      OPTIMIZER_FEATURES_ENABLE('11.2.0.1')
+      DB_VERSION('11.2.0.1')
+      OPT_PARAM('_eliminate_common_subexpr' 'false')
+      FIRST_ROWS(1)
+      OUTLINE_LEAF(@"SEL$51F12574")
+      MERGE(@"SEL$73523A42")
+      OUTLINE(@"SEL$1")
+      OUTLINE(@"SEL$73523A42")
+      ELIMINATE_OBY(@"SEL$2")
+      OUTLINE(@"SEL$2")
+      INDEX(@"SEL$51F12574" "D"@"SEL$2" ("DEPARTMENT"."DEPARTMENT_ID"))
+      INDEX(@"SEL$51F12574" "E"@"SEL$1" ("EMPLOYEE"."DEPARTMENT_ID"))
+      LEADING(@"SEL$51F12574" "D"@"SEL$2" "E"@"SEL$1")
+      USE_NL(@"SEL$51F12574" "E"@"SEL$1")
+      NLJ_BATCHING(@"SEL$51F12574" "E"@"SEL$1")
+      END_OUTLINE_DATA
+  */
+ 
+Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   5 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+   6 - filter("E"."JOB_ID"='ST_CLERK')
+ 
+Note
+-----
+   - cardinality feedback used for this statement
+```
+
+#### trace 10053
+* order by removed 로 OBYE 가 수행됨을 확인
+* OBYE 가 수행된 결과로 새로운 쿼리블럭인 SEL$73523A42 가 생성되었다.
+* 새로운 쿼리블럭 SEL$73523A42 의 From 절에 DEPARTMENT "D" 가 있음을 확인.
+* OBYE 파라미터 _optimizer_order_by_eliment_enabled 이며 default = true
+* ELIMINATE_OBY/NO_ELIMINATE_OBY 힌트를 사용하여 해당 기능을 Control 할 수 있다.
+```sql
+OBYE:   Considering Order-by Elimination from view SEL$1 (#0)
+***************************
+Order-by elimination (OBYE)
+***************************
+OBYE:   Considering Order-by Elimination from view SEL$2 (#0)
+***************************
+Order-by elimination (OBYE)
+***************************
+OBYE: Removing order by from query block SEL$2 (#0) (order not used)
+Registered qb: SEL$73523A42 0x1de21080 (ORDER BY REMOVED FROM QUERY BLOCK SEL$2; SEL$2)
+---------------------
+QUERY BLOCK SIGNATURE
+---------------------
+  signature (): qb_name=SEL$73523A42 nbfros=1 flg=0
+    fro(0): flg=0 objn=95044 hint_alias="D"@"SEL$2"
+
+OBYE:     OBYE performed.
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
