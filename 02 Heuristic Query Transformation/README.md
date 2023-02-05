@@ -652,21 +652,386 @@ QUERY BLOCK SIGNATURE
 OBYE:     OBYE performed.
 ```
 
+</br>
+
+## 2.6. DE (Distinct Eliminate)
+#### 불필요한 Distinct 를 제거하라\
+* DE는 select 절에 Unique 한 컬럼이 포함된 경우, 불필요한 Distinct 를 제거하는 기능.
+* 이로 인해 Sort , 중복제거 부하가 많은 작업을 수행하지 않을 수 있다. (이 기능은 11g 에서 추가되었다)
+```sql
+SELECT /*+ GATHER_PLAN_STATISTICS USE_NL(l) */  distinct d.DEPARTMENT_ID, l.location_id
+  FROM department d, LOCATION l
+ WHERE d.location_id = l.location_id ;
+ 
+SELECT * FROM 
+TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL,NULL, 'allstats last -rows +alias +outline +predicate')); 
+```
+* 실행계획에서 Distinct Operation 인 Sort Unique , Hash Unique 가 없음.
+* Transformer가 위 SQL을 분석, Distinct 가 없어도 Unique 함을 확인함.
+* d.department_id , l.location_id 는 두 테이블의 PK. PK 컬럼이 SELECT 절에 포함되면 Unique 하므로 Distinct operation 이 삭제된다.
+```sql
+PLAN_TABLE_OUTPUT
+----------------------------------------------------------------------------------
+| Id  | Operation          | Name       | Starts | A-Rows |   A-Time   | Buffers |
+----------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT   |            |      1 |     27 |00:00:00.01 |      12 |
+|   1 |  NESTED LOOPS      |            |      1 |     27 |00:00:00.01 |      12 |
+|   2 |   TABLE ACCESS FULL| DEPARTMENT |      1 |     27 |00:00:00.01 |       8 |
+|*  3 |   INDEX UNIQUE SCAN| LOC_ID_PK  |     27 |     27 |00:00:00.01 |       4 |
+----------------------------------------------------------------------------------
+ 
+Query Block Name / Object Alias (identified by operation id):
+-------------------------------------------------------------
+ 
+   1 - SEL$1
+   2 - SEL$1 / D@SEL$1
+   3 - SEL$1 / L@SEL$1
+ 
+Outline Data
+-------------
+ 
+  /*+
+      BEGIN_OUTLINE_DATA
+      IGNORE_OPTIM_EMBEDDED_HINTS
+      OPTIMIZER_FEATURES_ENABLE('11.2.0.1')
+      DB_VERSION('11.2.0.1')
+      OPT_PARAM('_eliminate_common_subexpr' 'false')
+      FIRST_ROWS(1)
+      OUTLINE_LEAF(@"SEL$1")
+      FULL(@"SEL$1" "D"@"SEL$1")
+      INDEX(@"SEL$1" "L"@"SEL$1" ("LOCATION"."LOCATION_ID"))
+      LEADING(@"SEL$1" "D"@"SEL$1" "L"@"SEL$1")
+      USE_NL(@"SEL$1" "L"@"SEL$1")
+      END_OUTLINE_DATA
+  */
+ 
+Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   3 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+```
+
+#### 10053 trace 
+* SEL$1 에서 Distinct 가 삭제되었음.
+* DE 가 OBYE 자리에서 수행됨을 확인할 수 있다. - 실행순서 상 OBYE 먼저 발생, 이후에 DE 수행됨.
+* (DE가 OBYE에 포함되는 개념은 아니다)
+```sql
+OBYE:   Considering Order-by Elimination from view SEL$1 (#0)
+***************************
+Order-by elimination (OBYE)
+***************************
+OBYE:     OBYE bypassed: no order by to eliminate.
+Eliminated SELECT DISTINCT from query block SEL$1 (#0)
+JE:   Considering Join Elimination on query block SEL$1 (#0)    **  Distinct 가 삭제되었음
+```
+#### Unique 하다고 항상 DE 가 발생하지는 않는다! (제약사항)
+* 컬럼 하나만 변경 ( l.location_id ) 되었는데 Hash Unique 가 수행되었다.
+  * 이유 : 논리적으로 select 절에 d.location_id 을 사용하거나, l.location_id 사용하는 것은 같으나, DE에 해당 기능은 제공되지 않는다.
+* 조인된 컬럼을 사용할 것인지, 참조되는 컬럼을 사용할 것인지 신중하게 결정해야 한다.
+* department 쪽 PK Constraint 를 Drop 하고 Unique index 만 존재한다면 DE가 발생하지 않는다. ( Null 데이터가 중복될 수 있기 때문 )
+  *  not null 제약조건을 추가하면 DE가 발생한다. ( 1:N 관계에서 N쪽은 Not Null 조건이 필요하다 )
+```sql
+SELECT /*+ GATHER_PLAN_STATISTICS USE_NL(l) */ distinct d.department_id, d.location_id
+    FROM department d, location l
+ WHERE d.location_id = l.location_id ;
+ 
+SELECT * FROM 
+TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL,NULL, 'allstats last -rows +alias +outline +predicate'));  
+```
+```sql
+PLAN_TABLE_OUTPUT
+-------------------------------------------------------------------------------------------------------------------------
+| Id  | Operation                | Name             | Starts | A-Rows |   A-Time   | Buffers |  OMem |  1Mem | Used-Mem |
+-------------------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT         |                  |      1 |     27 |00:00:00.01 |      12 |       |       |          |
+|   1 |  HASH UNIQUE             |                  |      1 |     27 |00:00:00.01 |      12 |  1270K|  1270K| 1340K (0)|
+|   2 |   NESTED LOOPS           |                  |      1 |     27 |00:00:00.01 |      12 |       |       |          |
+|   3 |    VIEW                  | index$_join$_001 |      1 |     27 |00:00:00.01 |       8 |       |       |          |
+|*  4 |     HASH JOIN            |                  |      1 |     27 |00:00:00.01 |       8 |  1096K|  1096K| 1449K (0)|
+|   5 |      INDEX FAST FULL SCAN| DEPT_ID_PK       |      1 |     27 |00:00:00.01 |       4 |       |       |          |
+|   6 |      INDEX FAST FULL SCAN| DEPT_LOCATION_IX |      1 |     27 |00:00:00.01 |       4 |       |       |          |
+|*  7 |    INDEX UNIQUE SCAN     | LOC_ID_PK        |     27 |     27 |00:00:00.01 |       4 |       |       |          |
+-------------------------------------------------------------------------------------------------------------------------
+ Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   4 - access(ROWID=ROWID)
+   7 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+```
+
+</br>
+
+#### DE의 또 다른 유형 DEUI (Distinct Elimination using Unique Index)
+* Unique 인덱스를 사용하여 INDEX UNIQUE SCAN Operation 이 나오는 경우 Distinct 를 제거한다.
+```sql
+explain plan for
+SELECT DISTINCT d.department_id, l.city, l.country_id
+  FROM department d, location l
+ WHERE d.location_id = l.location_id
+   AND d.department_id = 10 ;
 
 
+select * from table(dbms_xplan.display);
+```
+
+```sql
+PLAN_TABLE_OUTPUT
+-------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name       | Rows  | Bytes | Cost (%CPU)| Time     |
+-------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |            |     1 |    22 |     3  (34)| 00:00:01 |
+|   1 |  NESTED LOOPS                |            |     1 |    22 |     2   (0)| 00:00:01 |
+|   2 |   TABLE ACCESS BY INDEX ROWID| DEPARTMENT |     1 |     7 |     1   (0)| 00:00:01 |
+|*  3 |    INDEX UNIQUE SCAN         | DEPT_ID_PK |     1 |       |     0   (0)| 00:00:01 |
+|   4 |   TABLE ACCESS BY INDEX ROWID| LOCATION   |    23 |   345 |     1   (0)| 00:00:01 |
+|*  5 |    INDEX UNIQUE SCAN         | LOC_ID_PK  |     1 |       |     0   (0)| 00:00:01 |
+-------------------------------------------------------------------------------------------
+ 
+Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   3 - access("D"."DEPARTMENT_ID"=10)
+   5 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+```
+
+* Location 쪽 unique 컬럼이 select 절에 없음에도 Sort Unique, Hash Unique 가 실행되지 않는다.
+  * department, location 두 테이블에 모두 index unique scan 을 사용하기 때문에 결과가 1건 혹은 0을 보장한다.
+* 이는 DE기능이 아니다. DE 파라미터로 Control 할 수 없고 수행 로직이 다르기 때문.
+* DE : Index unique scan 과 상관없이 select 절에 각 테이블 unique 컬럼만 있으면 수행
+* DEUI : plan 상 operation 이 index unique scan 이면 언제든 수행 가능함. 그러나 Unique 인덱스 사용하지 않으면 DEUI는 수행되지 않음.
+
+#### SQL에서 FULL 힌트를 추가할 경우
+```sql 
+explain plan for
+SELECT /*+ FULL(d) */ DISTINCT d.department_id, l.city, l.country_id
+  FROM department d, location l
+ WHERE d.location_id = l.location_id
+   AND d.department_id = 10 ;
 
 
+select * from table(dbms_xplan.display);
+
+PLAN_TABLE_OUTPUT
+--------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name       | Rows  | Bytes | Cost (%CPU)| Time     |
+--------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |            |     1 |    22 |     5  (20)| 00:00:01 |
+|   1 |  HASH UNIQUE                  |            |     1 |    22 |     5  (20)| 00:00:01 |
+|   2 |   NESTED LOOPS                |            |       |       |            |          |
+|   3 |    NESTED LOOPS               |            |     1 |    22 |     4   (0)| 00:00:01 |
+|*  4 |     TABLE ACCESS FULL         | DEPARTMENT |     1 |     7 |     3   (0)| 00:00:01 |
+|*  5 |     INDEX UNIQUE SCAN         | LOC_ID_PK  |     1 |       |     0   (0)| 00:00:01 |
+|   6 |    TABLE ACCESS BY INDEX ROWID| LOCATION   |    23 |   345 |     1   (0)| 00:00:01 |
+--------------------------------------------------------------------------------------------
+ 
+Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   4 - filter("D"."DEPARTMENT_ID"=10)
+   5 - access("D"."LOCATION_ID"="L"."LOCATION_ID")
+```
+* department 테이블을 FULL SCAN 하니 Plan 상에 HASH UNIQUE 가 발생.
+### DE 수행 유무 - SELECT 절에 Unique 컬럼의 존재 유무에 따라 결정됨
+#### DEUI 수행 유무 - Access Path 가 INDEX UNIQUE SCAN 인지 아닌지에 따라 결정됨
+> "원인 없는 결과는 없다"
+  > 서브쿼리 Unnesting 되어 Driving 집합이되면, 메인쿼리 집합 보존을 위해 default 로 distinct 가 추가되는데,
+이 때 DE나 DEUI 기능이 수행되면 distinct 가 제거된다.  
+  > (서브쿼리 Unnesting 은 서브쿼리를 인라인뷰로 바꿔 정상적으로 조인으로 만드는 기능.)
+* DE는 10.2.0.4 에서도 수행되나, _optimizer_distinct_elimination 파라미터가 없는 것이 11g와 다른 점이다.
+
+</br>
+## CNT (Count(column) To Count(*))
+#### Count(컬럼) 사용시 해당 컬럼이 Not Null인 경우 Count( * )로 대체하라
+* CNT 기능 : Not Null 컬럼임에도 Count(컬럼) 을 사용하는 경우가 있는데, Logical OPtimizer는 Count( * ) 를 SQL로 바꾼다.
+```sql
+CREATE INDEX EMP_IDX_02 ON EMPLOYEE (JOB_ID, DEPARTMENT_ID);
+
+SELECT /*+ GATHER_PLAN_STATISTICS */ e.department_id, COUNT (e.last_name) cnt
+  FROM employee e
+ WHERE e.job_id = 'ST_CLERK'
+ GROUP BY e.department_id;
+
+SELECT * FROM 
+TABLE(DBMS_XPLAN.DISPLAY_CURSOR(NULL,NULL, 'allstats last -rows +alias +outline +predicate'));  
+```
+* 인덱스 : JOB_ID + DEPARTMENT_ID
+* Count 함수에서 LAST_NAME 컬럼을 사용하여 테이블 액세스가 있어야 하나, CNT 기능으로 count( * ) 로 바뀌어 인덱스만 Scan 하였다
+```sql
+PLAN_TABLE_OUTPUT
+------------------------------------------------------------------------------------
+| Id  | Operation            | Name       | Starts | A-Rows |   A-Time   | Buffers |
+------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT     |            |      1 |      1 |00:00:00.01 |       1 |
+|   1 |  SORT GROUP BY NOSORT|            |      1 |      1 |00:00:00.01 |       1 |
+|*  2 |   INDEX RANGE SCAN   | EMP_IDX_02 |      1 |     20 |00:00:00.01 |       1 |
+------------------------------------------------------------------------------------
+ 
+Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   2 - access("E"."JOB_ID"='ST_CLERK')
+```
+#### 10053 trace
+```sql
+CNT:   Considering count(col) to count(*) on query block SEL$1 (#0)
+*************************
+Count(col) to Count(*) (CNT)
+*************************
+CNT:     Converting COUNT(LAST_NAME) to COUNT(*).
+CNT:     COUNT() to COUNT(*) done.
+```
+#### CNT 기능은 항상 동작하는 것인가 ?
+* FIRST_NAME 컬럼이 Null허용 컬럼이기 때문에 CNT 가 작동하지 않음
+* 물리모델링 시 Not Null 컬럼이라면 Constraint 를 명시적으로 지정해야 한다.
+* 가능한한 Count( * ) 를 사용하라. Not null constraint 가 있는 컬럼을 count 에 사용하지 않아야 한다.
+#### CNT 기능이 있으므로 별 상관이 없다고 생각할 수 있지만 가장 좋은 것은 SQL이 완벽하여 Transpormation 기능이 추가적으로 실행되지 않도록 하는 것이다.
+#### 또한 Count(컬럼)은 어떠한 경우에서도 Count( * )보다 빠를 수 없다.
+```sql
+explain plan for
+SELECT e.department_id, COUNT (e.first_name) cnt
+  FROM employee e
+ WHERE e.job_id = 'ST_CLERK'
+ GROUP BY e.department_id;
+
+select * from table(dbms_xplan.display);
+
+PLAN_TABLE_OUTPUT
+-------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name       | Rows  | Bytes | Cost (%CPU)| Time     |
+-------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |            |     1 |    19 |     2   (0)| 00:00:01 |
+|   1 |  SORT GROUP BY NOSORT        |            |     1 |    19 |     2   (0)| 00:00:01 |
+|   2 |   TABLE ACCESS BY INDEX ROWID| EMPLOYEE   |     1 |    19 |     2   (0)| 00:00:01 |
+|*  3 |    INDEX RANGE SCAN          | EMP_IDX_02 |    20 |       |     1   (0)| 00:00:01 |
+-------------------------------------------------------------------------------------------
+ 
+Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   3 - access("E"."JOB_ID"='ST_CLERK')
+```
+
+## 2.8 FPD (Filter Push Down)
+#### 조건절을 뷰 내부로 이동시켜라
+* FPD는 뷰, 인라인뷰 밖에서 뷰 내부 컬럼을 이용하여 조건절을 사용할 때, 조건절이 뷰 내부로 침투되는 현상.
+  * 조건절의 a.job_id = 'MK_REP' 구문이 인라인뷰 조건절로 들어가는 것
+```sql
+explain plan for
+SELECT /*+ GATHER_PLAN_STATISTICS */ a.employee_id, a.first_name, 
+       a.last_name, a.email, 
+       b.department_name
+  FROM (SELECT /*+ NO_MERGE */
+               employee_id, first_name, last_name, job_id, email,
+               department_id
+          FROM employee) a,
+       department b
+ WHERE a.department_id = b.department_id 
+   AND a.job_id = 'MK_REP';   
+
+select * from table(dbms_xplan.display);
+
+PLAN_TABLE_OUTPUT
+Plan hash value: 1518082028
+ 
+---------------------------------------------------------------------------------------------
+| Id  | Operation                      | Name       | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT               |            |     1 |    74 |     3   (0)| 00:00:01 |
+|   1 |  NESTED LOOPS                  |            |       |       |            |          |
+|   2 |   NESTED LOOPS                 |            |     1 |    74 |     3   (0)| 00:00:01 |
+|   3 |    VIEW                        |            |     1 |    58 |     2   (0)| 00:00:01 |
+|   4 |     TABLE ACCESS BY INDEX ROWID| EMPLOYEE   |     1 |    39 |     2   (0)| 00:00:01 |
+|*  5 |      INDEX RANGE SCAN          | EMP_IDX_02 |     1 |       |     1   (0)| 00:00:01 |
+|*  6 |    INDEX UNIQUE SCAN           | DEPT_ID_PK |     1 |       |     0   (0)| 00:00:01 |
+|   7 |   TABLE ACCESS BY INDEX ROWID  | DEPARTMENT |     1 |    16 |     1   (0)| 00:00:01 |
+---------------------------------------------------------------------------------------------
+ 
+Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   5 - access("JOB_ID"='MK_REP')
+   6 - access("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID")
+```
 
 
+* 인라인뷰에 NO_MERGE 힌트 사용 이유 : SVM (Simple View Merging) 을 피하기 위해.
+SVM 발생 시 뷰가 해체되므로, 인라인 뷰로 파고드는 Filter 를 관찰할 수 없기 때문이다.  
+* a.job_id = 'MK_REP' 조건이 뷰 내부로 파고들었다. 그 결과 employee 테이블의 job_id 인덱스를 사용하였다.
 
+#### 10053 trace
+* 쿼리블럭 SEL$2 (인라인뷰) 에 FPD를 고려, 인라인뷰 내부에 조건절을 생성하였다.
+* predicate Move-Around Title 에서 FPD 발생 확인할 수 있다. ( 특정한 Title 이 없기 때문에 PM 이 끝나고 FPD 가 실행됨 )
 
+```sql
+**************************
+Predicate Move-Around (PM)
+**************************
+(생략)
+FPD: Considering simple filter push in query block SEL$2 (#0)
+"EMPLOYEE"."JOB_ID"='MK_REP'
+try to generate transitive predicate from check constraints for query block SEL$2 (#0)
+finally: "EMPLOYEE"."JOB_ID"='MK_REP'
+```
 
+* Transformer 가 SQL을 아래처럼 변경함
+```sql
+explain plan for
+SELECT a.employee_id, a.first_name, a.last_name, a.email, b.department_name
+  FROM (SELECT /*+ NO_MERGE */
+               employee_id, first_name, last_name, job_id, email,
+               department_id
+          FROM employee
+         WHERE job_id = 'MK_REP') a,
+       department b
+ WHERE a.department_id = b.department_id;
 
+select * from table(dbms_xplan.display);
+```
 
-
-
-
-
+#### 위 SQL에서 인라인뷰 내에서 Group By 나 Distinct 를 사용하지 않음 ( 이러한 인라인 뷰를 Simple View 라고 함 )
+* Simple view 에 적용된 FPD = Simple FPD
+* 10053 Trace 에서 "simple filter push" 항목으로 확인할 수 있다.
+* Group by, 집계함수 사용 시 이러한 Transformation 발생 = Cost Based Predicate Push Down 이라 한다. ( 3.1장 )
+* Simple view 라 하더라도, 인라인뷰 내부에서 rownum 사용 / rank 분석함수 사용하면 FPD기능 사용할 수 없다.
+```sql
+explain plan for
+SELECT a.employee_id, a.first_name, a.last_name, a.email, b.department_name,
+       a.salary_rank
+  FROM (SELECT /*+ NO_MERGE */
+               employee_id, first_name, last_name, job_id, email, department_id, 
+               RANK () OVER (ORDER BY salary) salary_rank
+          FROM employee) a,
+       department b
+ WHERE a.department_id = b.department_id 
+   AND a.job_id = 'MK_REP';
+   
+select * from table(dbms_xplan.display);
+```
+```sql
+PLAN_TABLE_OUTPUT
+--------------------------------------------------------------------------------------------
+| Id  | Operation               | Name             | Rows  | Bytes | Cost (%CPU)| Time     |
+--------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT        |                  |   104 | 10608 |     7  (29)| 00:00:01 |
+|*  1 |  HASH JOIN              |                  |   104 | 10608 |     7  (29)| 00:00:01 |
+|   2 |   VIEW                  | index$_join$_003 |    27 |   432 |     3  (34)| 00:00:01 |
+|*  3 |    HASH JOIN            |                  |       |       |            |          |
+|   4 |     INDEX FAST FULL SCAN| DEPT_ID_PK       |    27 |   432 |     1   (0)| 00:00:01 |
+|   5 |     INDEX FAST FULL SCAN| DEPT_NAME_IDX    |    27 |   432 |     1   (0)| 00:00:01 |
+|*  6 |   VIEW                  |                  |   107 |  9202 |     4  (25)| 00:00:01 |
+|   7 |    WINDOW SORT          |                  |   107 |  4601 |     4  (25)| 00:00:01 |
+|   8 |     TABLE ACCESS FULL   | EMPLOYEE         |   107 |  4601 |     3   (0)| 00:00:01 |
+--------------------------------------------------------------------------------------------
+ 
+Predicate Information (identified by operation id):
+---------------------------------------------------
+ 
+   1 - access("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID")
+   3 - access(ROWID=ROWID)
+   6 - filter("A"."JOB_ID"='MK_REP')    
+```
+#### 인라인 뷰 내부에서 분석함수 (rank) 사용 시 FPD 기능 수행되지 않음을 확인할 수 있다.
+* a.job_id = 'MK_REP' 조건이 view 외부로 밀려남
 
 
 
