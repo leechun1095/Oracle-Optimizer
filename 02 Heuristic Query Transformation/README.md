@@ -1033,5 +1033,220 @@ Predicate Information (identified by operation id):
 #### 인라인 뷰 내부에서 분석함수 (rank) 사용 시 FPD 기능 수행되지 않음을 확인할 수 있다.
 * a.job_id = 'MK_REP' 조건이 view 외부로 밀려남
 
+</br>
+
+## TP(Transitive Predicate or Transitive Closure)
+#### 조인절을 이용하여 다른 테이블에 상수조건을 생성시켜라
+
+```sql
+SELECT /*+ gather_plan_statistics */
+       e.*
+  FROM employee e, department d
+ WHERE e.department_id = d.department_id                  --DEPARTMENT_ID로 조인
+   AND e.department_id = 50;                              --d.department_id ='50'으로 바꾸어도 논리적으로 지장이없다.
+
+select * from table(dbms_xplan.display_cursor(null,null,'allstats last'));
+------------------------------------------------------------------------------------------------------------
+| Id  | Operation                    | Name              | Starts | E-Rows | A-Rows |   A-Time   | Buffers |
+------------------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT             |                   |      1 |        |     45 |00:00:00.01 |      14 |
+|   1 |  NESTED LOOPS                |                   |      1 |     45 |     45 |00:00:00.01 |      14 |
+|*  2 |   INDEX UNIQUE SCAN          | DEPT_ID_PK        |      1 |      1 |      1 |00:00:00.01 |       1 |
+|   3 |   TABLE ACCESS BY INDEX ROWID| EMPLOYEE          |      1 |     45 |     45 |00:00:00.01 |      13 |
+|*  4 |    INDEX RANGE SCAN          | EMP_DEPARTMENT_IX |      1 |     45 |     45 |00:00:00.01 |       6 |
+------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+2 - access("D"."DEPARTMENT_ID"=50)
+4 - access("E"."DEPARTMENT_ID"=50)
+```
+* Predicate Information에 (D.DEPARTMENT_ID=50)조건 생성
+
+</br>
+
+#### 변환된 SQL
+```sql
+SELECT /*+ gather_plan_statistics */
+       e.*
+  FROM employee e, department d
+ WHERE e.department_id = d.department_id
+   AND e.department_id = '50'
+   AND d.department_id='50';
+```
+
+#### 10053 trace
+```sql
+**************************
+Predicate Move-Around (PM)
+**************************
+PM:     PM bypassed: Outer query contains no views.
+PM:     PM bypassed: Outer query contains no views.
+query block SEL$1 (#0) unchanged
+FPD: Considering simple filter push in query block SEL$1 (#0)
+"E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND "E"."DEPARTMENT_ID"=50
+try to generate transitive predicate from check constraints for query block SEL$1 (#0)
+finally: "E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND "E"."DEPARTMENT_ID"=50 AND "D"."DEPARTMENT_ID"=50
+
+FPD:   transitive predicates are generated in query block SEL$1 (#0)
+"E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND "E"."DEPARTMENT_ID"=50 AND "D"."DEPARTMENT_ID"=50 --D.DEPARTMENT_ID=50조건이 추가적으로 생성
+```
+
+#### _optimizer_transitivity_retain를 False로 적용할 경우 Join절이 없어진다.
+* _optimizer_transitivity_retain : Transitive Closure에 의해 조인 조건이 없어지는 현상의 방지여부 지정
+```sql
+ALTER SESSION SET "_optimizer_transitivity_retain" = FALSE;
+
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1';
+
+select /*+ gather_plan_statistics */
+       e.EMPLOYEE_ID, e.EMAIL, e.HIRE_DATE
+  from EMPLOYEE e, DEPARTMENT  d
+ where e.DEPARTMENT_ID = d.DEPARTMENT_ID
+   and e.DEPARTMENT_ID = '50'
+
+ALTER SESSION SET EVENTS '10053 trace name context off';
+
+**************************
+Predicate Move-Around (PM)
+**************************
+PM:     PM bypassed: Outer query contains no views.                       -->PM실패 no views 
+PM:     PM bypassed: Outer query contains no views.
+query block SEL$1 (#0) unchanged
+FPD: Considering simple filter push in query block SEL$1 (#0)
+"E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND "E"."DEPARTMENT_ID"=50        -->조인조건이 존재함
+try to generate transitive predicate from check constraints for query block SEL$1 (#0)
+finally: "D"."DEPARTMENT_ID"=50 AND "E"."DEPARTMENT_ID"=50                -->조인절이 없어지고 상수 조건만 존재
+```
+* Operator Transformation이나 Tansive Predicate는 PM(Predicate Move Around)이 아니다.
+* Predicate Move-Around(PM)자리에 Transitive Predicate가 발생했지만 PM은 발생하지 않았다.(no view) (2.15장에서 설명)
+* PM은 2.15장에서 자세히 설명
+
+</br>
+
+## 2.10 SVM(Simple View Merging)
+#### Simple View를 해체하여 메인 쿼리와 통합하라
+* simple view : 뷰(혹은 인라인뷰) 내부에 Group By나 Distinct 등이 없는 것
+* SVM : 오라클 Transformer가 simple view를 만났을때 view를 해체하고 메인 쿼리와 통합하는 작업
+* CVM : view내부에 Distinct나 Group By를 사용하는 경우에도 View Merging(뷰의 해체 작업)이 일어남 (3.8장에서 설명)
+
+```sql
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1';
+
+   
+select A.EMPLOYEE_ID, A.FIRST_NAME, A.LAST_NAME, A.EMAIL, B.DEPARTMENT_ID
+  from EMPLOYEE  a,
+       (select B.DEPARTMENT_ID, B.DEPARTMENT_NAME
+          from DEPARTMENT b
+         where B.DEPARTMENT_ID = :v_deptno ) b
+ where a.DEPARTMENT_ID = b.DEPARTMENT_ID;    
+
+
+ALTER SESSION SET EVENTS '10053 trace name context off';
+
+============
+Plan Table
+============
+---------------------------------------------------------+-----------------------------------+
+| Id  | Operation                     | Name             | Rows  | Bytes | Cost  | Time      |
+---------------------------------------------------------+-----------------------------------+
+| 0   | SELECT STATEMENT              |                  |       |       |     1 |           |
+| 1   |  NESTED LOOPS                 |                  |    10 |   330 |     0 |           |
+| 2   |   INDEX UNIQUE SCAN           | DEPT_ID_PK       |     1 |     3 |     0 |           |
+| 3   |   TABLE ACCESS BY INDEX ROWID | EMPLOYEE         |    10 |   300 |     0 |           |
+| 4   |    INDEX RANGE SCAN           | EMP_DEPARTMENT_IX|    10 |       |     0 |           |
+---------------------------------------------------------+-----------------------------------+
+
+*** 2013-06-11 14:52:17.132
+Predicate Information:
+----------------------
+2 - access("B"."DEPARTMENT_ID"=TO_NUMBER(:V_DEPTNO))
+4 - access("A"."DEPARTMENT_ID"=TO_NUMBER(:V_DEPTNO))
+```
+* Plan상에서 View가 사라졌다. Transformer가 SQL을 아래처럼 바꿈
+
+</br>
+
+#### SQL 변환
+```sql
+SELECT a.employee_id, a.first_name, a.last_name, a.email, b.department_id
+  FROM employee a, department b
+ WHERE a.department_id = b.department_id
+   AND b.department_id = :v_deptno
+   AND a.department_id = :v_deptno;  -- View Merging이 발생함으로써 Transitive Predicate(조건절 전이)가 발생하였다.
+```
+* 인라인뷰 b 내부의 DEPATMENT_NAME을 Select하려면 DEPARTMENT 테이블을 Scan하는 Operation이 필요한데 그에 해당하는 Operation이 존재하지 않는다.
+* 이러한 현상은 SVM 과정에서 인라인뷰 외부에서 사용하지 않는 컬럼들을 Transformaer가 제거해 버리기 때문에 발생한다.
+* 이기능은 SVM이 수행될 때 부가적으로 발생되는 기능이다.
+
+</br>
+
+#### Merge
+```sql
+outline Data:
+     /*+
+          BEGIN_Outline_DATA
+               ... 중간생략
+               MERGE(@"SEL$2")
+               ...중간생략
+          END_Outline_DATA
+     */
+```
+* 오라클이 내부적으로 Merge 힌트를 사용한 것을 알 수 있다.
+* 오라클은 이와같이 내부적인 힌트를 사용함으로써 Transformation을 수행한다.
+* DBMS_XPLAN의 outline Data를 분석해보면 많은 경우에 오라클의 내부적인 힌트의 사용을 관찰할 수 있다.
+
+</br>
+
+#### Join Elimination (JE)
+```sql
+*************************
+Join Elimination (JE)
+*************************
+... 중간생략
+CVM: Considering view merge in query block SEL$1 (#0)
+OJE: Begin: find best directive for query block SEL$1 (#0)
+OJE: End: finding best directive for query block SEL$1 (#0)
+CVM:   Checking validity of merging in query block SEL$2 (#0)
+CVM: Considering view merge in query block SEL$2 (#0)
+OJE: Begin: find best directive for query block SEL$2 (#0)
+OJE: End: finding best directive for query block SEL$2 (#0)
+CVM:   Merging SPJ view SEL$2 (#0) into SEL$1 (#0)        --SEL$2가 해체되어 SEL$1으로 통합
+Registered qb: SEL$F5BB74E1 0x10902870 (VIEW MERGE SEL$1; SEL$2)
+```
+
+</br> 
+
+#### Transitive Predicate
+* SVM이 수행되면 후속작업으로 Transitive Predicate가 일어난다.
+```sql
+**************************
+Predicate Move-Around (PM)
+**************************
+PM:     PM bypassed: Outer query contains no views.
+PM:     PM bypassed: Outer query contains no views.
+query block SEL$F5BB74E1 (#0) unchanged
+FPD: Considering simple filter push in query block SEL$F5BB74E1 (#0)
+"A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID" AND "B"."DEPARTMENT_ID"=TO_NUMBER(:B1)
+try to generate transitive predicate from check constraints for query block SEL$F5BB74E1 (#0)
+finally: "A"."DEPARTMENT_ID"=TO_NUMBER(:B1) AND "B"."DEPARTMENT_ID"=TO_NUMBER(:B2)
+```
+* EMPLOYEE 테이블이 뷰와 조인하지 않고 DEPARTMENT 테이블과 직접 조인이 발생함으로써 Transitive Predicate가 발생될 수 있다
+
+#### Transformer가 View Merge를 시도하는 이유
+* View Merger에 의한 또 다른 형태의 Transformation을 발생시키기 위함. JE, OBYE, OJE, Transitive Predicate 등이 View Merge에 의해서 추가로 발생할 수 있기 때문에 이과정은 대단히 중요한 역할을 한다.
+  * 뷰 바깥쪽 테이블과 관련된 이러한 변환들은 뷰가 해체되기 전에는 발생될 수가 없다.
+* SQL의 복잡성을 회피하여 SQL의 Costing을 쉽게 하자는 것.
+  * 복잡성회피 : 쿼리블럭의 개수를 줄여서 성능을 개선하자는 의미. 여러개의 쿼리블럭을 하나로 만들어 뷰를 해체하게 되면 뷰 바깥쪽에 존재하는 테이블과의 조인순서를 Physical Optimizer가 최적으로 조정할 수 있어 성능이 향상된다.
+
+
+
+
+
+
+
+
+
 
 
