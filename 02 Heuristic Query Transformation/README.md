@@ -1035,7 +1035,7 @@ Predicate Information (identified by operation id):
 
 </br>
 
-## TP(Transitive Predicate or Transitive Closure)
+## 2.9 TP(Transitive Predicate or Transitive Closure)
 #### 조인절을 이용하여 다른 테이블에 상수조건을 생성시켜라
 
 ```sql
@@ -1239,6 +1239,243 @@ finally: "A"."DEPARTMENT_ID"=TO_NUMBER(:B1) AND "B"."DEPARTMENT_ID"=TO_NUMBER(:B
   * 뷰 바깥쪽 테이블과 관련된 이러한 변환들은 뷰가 해체되기 전에는 발생될 수가 없다.
 * SQL의 복잡성을 회피하여 SQL의 Costing을 쉽게 하자는 것.
   * 복잡성회피 : 쿼리블럭의 개수를 줄여서 성능을 개선하자는 의미. 여러개의 쿼리블럭을 하나로 만들어 뷰를 해체하게 되면 뷰 바깥쪽에 존재하는 테이블과의 조인순서를 Physical Optimizer가 최적으로 조정할 수 있어 성능이 향상된다.
+
+</br>
+
+## 2.11 LV* (Lateral View)
+#### View를 Scalar 서브쿼리처럼 사용하라
+* Lateral View : 스칼라 인라인뷰 (인라인뷰지만 마치 스칼라 서브쿼리처럼 메인쿼리의 컬럼들을 이용하여 조인하고 Filter 할 수 있다.
+```sql
+SELECT e.employee_id, e.email, d.department_id
+  FROM employee e 
+  LEFT OUTER JOIN department d
+    ON ( e.department_id = d.department_id 
+   AND e.employee_id > 7600);
+
+EMPLOYE EMAIL                     DEPAR
+------- ------------------------- -----
+    189 JDILLY
+    190 TGATES
+    191 RPERKINS
+    192 SBELL
+    193 BEVERETT
+ .
+ .
+ .                        --중략
+    186 JDELLING
+    187 ACABRIO
+    188 KCHUNG
+
+107 rows selected.        --사번이 7600보다 큰 건들만 조회되지 않고 전체가 조회되었다.
+```
+#### 10053 trace
+```sql
+*************************
+Join Elimination (JE)
+*************************
+SQL:******* UNPARSED QUERY IS *******
+SELECT "E"."EMPLOYEE_ID" "EMPLOYEE_ID",
+			 "E"."EMAIL" "EMAIL",
+			 "E"."DEPARTMENT_ID" "QCSJ_C000000000300000",
+			 "from$_subquery$_004"."DEPARTMENT_ID_0" "QCSJ_C000000000300001"
+FROM "TLO"."EMPLOYEE" "E",
+			LATERAL( (SELECT "D"."DEPARTMENT_ID" "DEPARTMENT_ID_0"
+			          FROM "TLO"."DEPARTMENT" "D"
+			          WHERE "E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID" AND "E"."EMPLOYEE_ID">7600))(+) "from$_subquery$_004"
+--인라인뷰를 Scalar서브쿼리처럼 사용
+```
+```sql
+============
+Plan Table
+============
+----------------------------------------+-----------------------------------+
+| Id  | Operation           | Name      | Rows  | Bytes | Cost  | Time      |
+----------------------------------------+-----------------------------------+
+| 0   | SELECT STATEMENT    |           |       |       |     3 |           |
+| 1   |  NESTED LOOPS OUTER |           |   107 |  1605 |     2 |  00:00:01 |
+| 2   |   TABLE ACCESS FULL | EMPLOYEE  |   107 |  1284 |     2 |  00:00:01 |
+| 3   |   INDEX UNIQUE SCAN | DEPT_ID_PK|     1 |     3 |     0 |           |
+----------------------------------------+-----------------------------------+
+Predicate Information:
+----------------------
+3 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+3 - filter("E"."EMPLOYEE_ID">CASE  WHEN ("D"."DEPARTMENT_ID" IS NOT NULL) THEN 7600 ELSE 7600 END )
+```
+#### 결론
+* Lateral View는 결과 건수에 영향을 미치지 못하는 스칼라 인라인뷰이다.
+* E.EMPLOYEE_ID > 7600 조건은 결과 건수에 영향을 못미치고 DEPARTMENT와의 조인건수에만 영향을 끼친다.
+* Lateral View는 마치 스칼라 서브쿼리처럼 동작하므로 Sort Merge Join이나 Hash Jon을 사용할수 없고 Nested Loop Join만 가능하다. 또한 Driving 집합이 될 수 없다.
+
+</br>
+
+## 2.12 FOJC* (Full Outer Join Conversion)
+#### Full Outer 조인을 Union All로 변경하라
+* Full Outer Join의 일반적인 개념 : 하나의 테이블 기준으로 Outer Join을 한다.
+* Union : 반대편 테이블을 기준으로 다시 Outer Join을 한다.(Union이 Union All로 바뀜)
+* _optimizer_native_full_outer_join
+  * full outer join 발생시 이 파라미터가 off 이면(10g) 문장은 두개의 쿼리블럭(left outer join 과 anti join)으로 나뉘어져 union all 되게 변환된다.
+  * 이 파라미터를 force 로 두면(11g) anti join 부분이 제거되어 성능이득이 있다.
+  * 이 기능을 Native Full Outer Join 이라 하며 2.13 장에 소개된다
+
+* _optimizer_native_full_outer_join = OFF;
+```sql
+alter session set "_optimizer_native_full_outer_join" = OFF;
+
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1';
+
+SELECT a.employee_id, a.first_name, a.last_name, a.email, b.department_name
+  FROM employee a FULL OUTER JOIN department b
+    ON (a.department_id = b.department_id) ;
+
+ALTER SESSION SET EVENTS '10053 trace name context off';
+
+-----------------------------------------------------------+-----------------------------------+
+| Id  | Operation                       | Name             | Rows  | Bytes | Cost  | Time      |
+-----------------------------------------------------------+-----------------------------------+
+| 0   | SELECT STATEMENT                |                  |       |       |     7 |           |
+| 1   |  VIEW                           |                  |   124 |  8680 |     7 |  00:00:01 |
+| 2   |   UNION-ALL                     |                  |       |       |       |           |
+| 3   |    HASH JOIN OUTER              |                  |   107 |  4708 |     5 |  00:00:01 |
+| 4   |     TABLE ACCESS FULL           | EMPLOYEE         |   107 |  3210 |     2 |  00:00:01 |
+| 5   |     TABLE ACCESS FULL           | DEPARTMENT       |    27 |   378 |     2 |  00:00:01 |
+| 6   |    MERGE JOIN ANTI              |                  |    17 |   289 |     1 |  00:00:01 |
+| 7   |     TABLE ACCESS BY INDEX ROWID | DEPARTMENT       |    27 |   378 |     0 |           |
+| 8   |      INDEX FULL SCAN            | DEPT_ID_PK       |    27 |       |     0 |           |
+| 9   |     SORT UNIQUE                 |                  |   107 |   321 |     1 |  00:00:01 |
+| 10  |      INDEX FULL SCAN            | EMP_DEPARTMENT_IX|   107 |   321 |     0 |           |
+-----------------------------------------------------------+-----------------------------------+
+Predicate Information:
+----------------------
+3 - access("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID")
+9 - access("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID")
+9 - filter("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID")
+```
+* 윗부분은 분명히 Outer 조인으로 풀렸지만 아랫부분은 Anti 조인으로 풀렸으므로 이것은 서브쿼리를 사용한 것이다
+* 즉,옵티마이져는 Full Outer Join을 아래처럼 Union All로 재작성한 것이다
+```sql
+explain plan for
+SELECT *
+  FROM (SELECT a.employee_id, a.first_name, a.last_name, a.email, b.department_name
+          FROM employee a, department b
+         WHERE a.department_id = b.department_id(+)
+        UNION ALL
+        SELECT NULL, NULL, NULL, NULL, b.department_name
+          FROM department b
+         WHERE NOT EXISTS (SELECT 1
+                             FROM employee a
+                            WHERE a.department_id = b.department_id)
+       );
+
+select * from table(dbms_xplan.display);
+----------------------------------------------------------------------------------------------------
+| Id  | Operation                      | Name              | Rows  | Bytes | Cost (%CPU)| Time     |
+----------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT               |                   |   124 |  8680 |     7  (43)| 00:00:01 |
+|   1 |  VIEW                          |                   |   124 |  8680 |     7  (43)| 00:00:01 |
+|   2 |   UNION-ALL                    |                   |       |       |            |          |
+|*  3 |    HASH JOIN OUTER             |                   |   107 |  4708 |     5  (20)| 00:00:01 |
+|   4 |     TABLE ACCESS FULL          | EMPLOYEE          |   107 |  3210 |     2   (0)| 00:00:01 |
+|   5 |     TABLE ACCESS FULL          | DEPARTMENT        |    27 |   378 |     2   (0)| 00:00:01 |
+|   6 |    MERGE JOIN ANTI             |                   |    17 |   289 |     1 (100)| 00:00:01 |
+|   7 |     TABLE ACCESS BY INDEX ROWID| DEPARTMENT        |    27 |   378 |     0   (0)| 00:00:01 |
+|   8 |      INDEX FULL SCAN           | DEPT_ID_PK        |    27 |       |     0   (0)| 00:00:01 |
+|*  9 |     SORT UNIQUE                |                   |   107 |   321 |     1 (100)| 00:00:01 |
+|  10 |      INDEX FULL SCAN           | EMP_DEPARTMENT_IX |   107 |   321 |     0   (0)| 00:00:01 |
+----------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+3 - access("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID"(+))
+9 - access("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID")
+filter("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID")
+
+24 rows selected.
+```
+#### 10053 trace
+* Full Outer Join과 같은 Ouery Transformation을 분석할 때 도움이 되는 팁은 Trace의 가장 마지막에 Ouery Block Registry 정보가 있는데 이것이 Ouery Transformation의 요약정보이다.
+```sql
+Query Block Registry:
+SEL$5 0x10b08af0 (PARSER) [FINAL]
+SET$1 0x10b00048 (PARSER) [FINAL]
+SEL$4 0x10b00318 (PARSER)
+  SEL$45B11F62 0x10b00318 (SUBQUERY UNNEST SEL$4; SEL$3) [FINAL]
+SEL$3 0x10afcf08 (PARSER)
+  SEL$45B11F62 0x10b00318 (SUBQUERY UNNEST SEL$4; SEL$3) [FINAL]
+SEL$2 0x10affd78 (PARSER)
+  SEL$58A6D7F6 0x10affd78 (VIEW MERGE SEL$2; SEL$1) [FINAL]
+SEL$1 0x10afe938 (PARSER)
+  SEL$58A6D7F6 0x10affd78 (VIEW MERGE SEL$2; SEL$1) [FINAL]
+```
+#### Ouery Block Registry을 분석할 때는 아래서부터 위로 분석하여야 한다
+1. 쿼리블럭 SEL$1 이 SEL$2에 MERGE 되어 쿼리블럭 SEL$58A6D7F6가 만들어 졌다. 이것은 인라인뷰 등이 해체될 때 VIEW MERGE가 발생된다.
+2. 쿼리블럭 SEL$3 이 SEL$4로 Unnesting 되어 쿼리블럭 SEL$45B11F62가 만들어 졌다 이것은 Anti 조인을 의미한다.
+3. 1번과 2번을 Union All로 연결시켜서 쿼리블럭 SET$1 이 만들어 졌다 Union이나 Minus 등의 Set연산자가 사용되면 쿼리블럭명이 SET$N으로 만들어진다
+4. 최종 쿼리블럭 SEL$5를 만든다.
+
+#### UNPARSED OUERY
+```sql
+SELECT "A"."EMPLOYEE_ID" "EMPLOYEE_ID",
+			 "A"."FIRST_NAME" "FIRST_NAME",
+			 "A"."LAST_NAME" "LAST_NAME",
+			 "A"."EMAIL" "EMAIL",
+			 "A"."DEPARTMENT_ID" "QCSJ_C000000000300000",
+			 "from$_subquery$_004"."DEPARTMENT_ID_1" "QCSJ_C000000000300001",
+			 "from$_subquery$_004"."DEPARTMENT_NAME_0" "DEPARTMENT_NAME"
+FROM "TLO"."EMPLOYEE" "A",
+      LATERAL( (SELECT "B"."DEPARTMENT_NAME" "DEPARTMENT_NAME_0",
+                       "B"."DEPARTMENT_ID" "DEPARTMENT_ID_1"
+                FROM "TLO"."DEPARTMENT" "B"
+                WHERE "A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID")
+             )(+) "from$_subquery$_004"
+```
+* UNPARSED QUERY는 Transformer가 SQL 변환작업시에 생성되는 TEMP성 SQL, 분석시 요긴하게 사용됨
+* 오라클은 Outer 조인을 변환할 시에는 많은 경우에 Outer쪽을 View로 미리 변환 시켜버린다
+  * View Merging과 JPPD(Join Predicate Push Down)를 동시에 Costing 해야하기때문
+  * 이것은 매우 어려운 개념이기 때문에 지금은 이린 것이 있다는 정도만 알아 두자. 이 관점은 4.12 장과 4.13 장에서 자세히 소개된다.
+  * JPPD 또한 3.9 장부터 3.13 장까지 자세히 설명된다.
+
+#### QUERY BLOCK SIGNATURE
+* 쿼리블럭 SEL$1 ~ SEL$4에 해당하는 테이블정보
+```sql
+Registered qb: SEL$1 0x10afe938 (PARSER)
+---------------------
+QUERY BLOCK SIGNATURE
+---------------------
+  signature (): qb_name=SEL$1 nbfros=1 flg=0
+    fro(0): flg=4 objn=459677 hint_alias="B"@"SEL$1"
+
+Registered qb: SEL$2 0x10affd78 (PARSER)
+---------------------
+QUERY BLOCK SIGNATURE
+---------------------
+  signature (): qb_name=SEL$2 nbfros=2 flg=0
+    fro(0): flg=4 objn=459680 hint_alias="A"@"SEL$2"
+    fro(1): flg=5 objn=0 hint_alias="from$_subquery$_004"@"SEL$2"
+
+Registered qb: SEL$3 0x10afcf08 (PARSER)
+---------------------
+QUERY BLOCK SIGNATURE
+---------------------
+  signature (): qb_name=SEL$3 nbfros=1 flg=0
+    fro(0): flg=4 objn=459680 hint_alias="A"@"SEL$3"
+
+Registered qb: SEL$4 0x10b00318 (PARSER)
+---------------------
+QUERY BLOCK SIGNATURE
+---------------------
+  signature (): qb_name=SEL$4 nbfros=1 flg=0
+    fro(0): flg=4 objn=459677 hint_alias="B"@"SEL$4"
+```
+
+* Query Parser가 SQL을 수집하여 개별 QUERY BLOCK으로 구분한 것이다.
+* Query Transformation이 발생하면 QUERY VLOCK의 명이 바뀔수 있으므로 힌트에 쿼리블록명을 사용할 경우 항상 확인 후 사용해야 함
+```sql
+-- 쿼리블록명 확인
+SELECT * FROM TABLE(DBMS_XPlan.dispay_cursor(NULL,NULL,'allstats last -rows +alias +outline +predicate')); -- alias추가 
+```
+
+
 
 
 
