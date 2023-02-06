@@ -101,6 +101,8 @@ Predicate Information (identified by operation id):
    1 - filter(("DEPARTMENT_ID"=60 OR ("SALARY"=4200 AND "DEPARTMENT_ID"=60)))
 ```
 
+</br>
+
 ## 2.2 JE (Join Elimination)
 #### 부모 테이블 & 자식 테이블 조인 시 SELECT 절에 자식 테이블 컬럼만 사용할 때 PK가 생성되어 있다면 부모 테이블을 접근하지 않는다. 왜냐하면 FK가 존재하는 자식 테이블에 존재하는 값이 100% 부모 테이블에도 존재한다는 것을 보장하기 때문에 부모 테이블을 액세스 할 필요가 없어지기 때문이다.
 * FK를 사용하면 느려진다 ? - JE기능이 나오기 전까지는 그러했다.
@@ -840,6 +842,7 @@ Predicate Information (identified by operation id):
 * DE는 10.2.0.4 에서도 수행되나, _optimizer_distinct_elimination 파라미터가 없는 것이 11g와 다른 점이다.
 
 </br>
+
 ## 2.7 CNT (Count(column) To Count(*))
 #### Count(컬럼) 사용시 해당 컬럼이 Not Null인 경우 Count( * )로 대체하라
 * CNT 기능 : Not Null 컬럼임에도 Count(컬럼) 을 사용하는 경우가 있는데, Logical OPtimizer는 Count( * ) 를 SQL로 바꾼다.
@@ -910,6 +913,8 @@ Predicate Information (identified by operation id):
  
    3 - access("E"."JOB_ID"='ST_CLERK')
 ```
+
+</br>
 
 ## 2.8 FPD (Filter Push Down)
 #### 조건절을 뷰 내부로 이동시켜라
