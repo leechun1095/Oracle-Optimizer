@@ -1480,8 +1480,46 @@ QUERY BLOCK SIGNATURE
 SELECT * FROM TABLE(DBMS_XPlan.dispay_cursor(NULL,NULL,'allstats last -rows +alias +outline +predicate')); -- alias추가 
 ```
 
+</br>
 
+## 2.13 NFOJ* (Native Full Outer Join)
+#### Full Outer 조인시 중복 Scan되는 테이블을 제거하라
+* 10g R2 버전에서 Full Outer 조인을 실행하면 Union All로 분리 되어 Outer 조인과 Anti Join이 각각 수행된다. 
+  * 이것은 파라미터 _optimizer _native_full_outer join가 off로 설정되어 있기 때문이다.
+* 하지만 11g부터는 Default가 Force로 설정되어 있으므로 Union All과 Anti Join이 사라진다 향상된 Full Outer Join을 살펴보자
+```sql
+alter session set "_optimizer_native_full_outer_join" = FORCE;
 
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1';
+  
+SELECT /*+ gather_plan_statistics */
+	     a.employee_id, a.first_name, a.last_name, b.department_name
+  FROM employee a FULL OUTER JOIN department b
+    ON (a.department_id = b.department_id) ;  
+  
+ALTER SESSION SET EVENTS '10053 trace name context off';
+============
+Plan Table
+============
+-------------------------------------------+-----------------------------------+
+| Id  | Operation              | Name      | Rows  | Bytes | Cost  | Time      |
+-------------------------------------------+-----------------------------------+
+| 0   | SELECT STATEMENT       |           |       |       |     5 |           |
+| 1   |  VIEW                  | VW_FOJ_0  |   122 |  6832 |     5 |  00:00:01 |
+| 2   |   HASH JOIN FULL OUTER |           |   122 |  4392 |     5 |  00:00:01 |
+| 3   |    TABLE ACCESS FULL   | DEPARTMENT|    27 |   378 |     2 |  00:00:01 |
+| 4   |    TABLE ACCESS FULL   | EMPLOYEE  |   107 |  2354 |     2 |  00:00:01 |
+-------------------------------------------+-----------------------------------+
+Predicate Information:
+----------------------
+2 - access("A"."DEPARTMENT_ID"="B"."DEPARTMENT_ID") 
+```
+* Union All과 Anti 조인이 사라졌다. 같은 테이블을 2 번씩 Scan하는 비효율이 제거되었다
+  * 이 기능은 Native Hash Full Outer Join 이라고 불린다
+* Native Full Outer Join이 발생하면 VW_FOJ_0(Full Outer Join)뷰가 생성된다.
+* Native Hash Full Outer Join은 힌트로도 제어가 가능
+  * /*+ NO_NATIVE_FULL_OUTER_JOIN */ Native Hash Full Outer Join 기능 제거
+  * /*+ NATIVE_FULL_OUTER_JOIN */ Native Hash Full Outer Join 기능 사용
 
 
 
