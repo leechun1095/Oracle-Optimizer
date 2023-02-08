@@ -1521,12 +1521,166 @@ Predicate Information:
   * /*+ NO_NATIVE_FULL_OUTER_JOIN */ Native Hash Full Outer Join 기능 제거
   * /*+ NATIVE_FULL_OUTER_JOIN */ Native Hash Full Outer Join 기능 사용
 
+#### Native Hash Full Outer Join 기능 때문에 Query Transformation을 방해하는 것을 여러 곳에서 볼 수 있다
+```sql
+**************************
+Query transformations (QT)
+**************************
+JF: Checking validity of join factorization for query block SEL$1 (#0)
+JF: Bypassed: not a UNION or UNION-ALL query block.
+ST: not valid since star transformation parameter is FALSE
+TE: Checking validity of table expansion for query block SEL$1 (#0)
+TE: Bypassed: Full outer-joined table.
+Check Basic Validity for Non-Union View for query block SEL$1 (#0)
+JPPD:     JPPD bypassed: View has full outer join.                           <--
+JF: Checking validity of join factorization for query block SEL$2 (#0)
+JF: Bypassed: not a UNION or UNION-ALL query block.
+ST: not valid since star transformation parameter is FALSE
+TE: Checking validity of table expansion for query block SEL$2 (#0)
+TE: Bypassed: No partitioned table in query block.
+CBQT bypassed for query block SEL$2 (#0): no complex view, sub-queries or UNION (ALL) queries.
+CBQT: Validity checks failed for 9kpbkmnjhbsrn.
+CSE: Considering common sub-expression elimination in query block SEL$2 (#0)
+*************************
+Common Subexpression elimination (CSE)
+*************************
+CSE: Considering common sub-expression elimination in query block SEL$1 (#0)
+*************************
+Common Subexpression elimination (CSE)
+*************************
+CSE:     CSE not performed on query block SEL$1 (#0).
+CSE:     CSE not performed on query block SEL$2 (#0).
+OBYE:   Considering Order-by Elimination from view SEL$2 (#0)
+***************************
+Order-by elimination (OBYE)
+***************************
+OBYE:     OBYE bypassed: no order by to eliminate.
+CVM: Considering view merge in query block SEL$2 (#0)
+OJE: Begin: find best directive for query block SEL$2 (#0)
+OJE: OJ to IJ validity check falied.
+OJE: End: finding best directive for query block SEL$2 (#0)
+CVM:   Checking validity of merging in query block SEL$1 (#0)
+CVM: Considering view merge in query block SEL$1 (#0)
+OJE: Begin: find best directive for query block SEL$1 (#0)
+OJE: End: finding best directive for query block SEL$1 (#0)
+SVM:     SVM bypassed: Full Outer Join.                                    <--
+SLP: Removed select list item QCSJ_C000000000300000 from query block SEL$1
+SLP: Removed select list item QCSJ_C000000000300001 from query block SEL$1
+query block SEL$2 (#0) unchanged
+Considering Query Transformations on query block SEL$2 (#0)
+**************************
+Query transformations (QT)
+**************************
+JF: Checking validity of join factorization for query block SEL$1 (#0)
+JF: Bypassed: not a UNION or UNION-ALL query block.
+ST: not valid since star transformation parameter is FALSE
+TE: Checking validity of table expansion for query block SEL$1 (#0)
+TE: Bypassed: Full outer-joined table.
+Check Basic Validity for Non-Union View for query block SEL$1 (#0)
+JPPD:     JPPD bypassed: View has full outer join.                           <--
+```
+* 이처럼 Native Full Outer Join 기능 사용시 Query Transformation이 발생하지 않는 경우가 있다.
+  * 이점만 주의한다면 Native Full Outer Join은 최적의 선택이 될 것이다.
 
+</br>
 
+## 2.14 OT* (Operator Transformation)
+#### 특정 연산자를 다른 연산자로 변환하라
+* Oracle Transformer는 종종 개발자가 작성하지 않은 Where 절을 추론하여 생성 하곤 한다
+* 그 이유는 Transformer가 특정 연산자를 만나면 다른 연산자로 변환하는 RULE을 가지고 있기 때문이다.
+```sql
+-- Operator Transformation 발생시 사용되는 RULE
+1. ALL 연산자를 AND로 변환한다.
+2. ANY 연산자를 OR로 변환한다
+3. IN 연산자를 OR로 변환한다
+4. NOT 연산자를 제거한다
+5. BETWEEN 연산자를 >= AND <= 연산자로 변환한다.
+```
 
+</br>
 
+#### ALL 연산자를 AND로 변환
+```sql
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1';
 
+SELECT e.employee_id, e.hire_date, e.job_id, d.department_name
+  FROM employee e, department d
+ WHERE e.department_id = d.department_id
+   AND e.salary > ALL (2600, 4400, 13000);
 
+ALTER SESSION SET EVENTS '10053 trace name context off';
+============
+Plan Table
+============
+--------------------------------------------------+-----------------------------------+
+| Id  | Operation                     | Name      | Rows  | Bytes | Cost  | Time      |
+--------------------------------------------------+-----------------------------------+
+| 0   | SELECT STATEMENT              |           |       |       |     4 |           |
+| 1   |  MERGE JOIN                   |           |    53 |  2226 |     3 |  00:00:01 |
+| 2   |   TABLE ACCESS BY INDEX ROWID | DEPARTMENT|    27 |   378 |     0 |           |
+| 3   |    INDEX FULL SCAN            | DEPT_ID_PK|    27 |       |     0 |           |
+| 4   |   SORT JOIN                   |           |    54 |  1512 |     3 |  00:00:01 |
+| 5   |    TABLE ACCESS FULL          | EMPLOYEE  |    54 |  1512 |     2 |  00:00:01 |
+--------------------------------------------------+-----------------------------------+
+Predicate Information:
+----------------------
+4 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+4 - filter("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+5 - filter("E"."SALARY">13000)
+```
+* e.salary > ALL (2600, 4400 , 13000) 조건은 다음과 같이 2단계의 변환과정을 거친다
+  * 1단계변환 :
+    * 옵티마이져는 ALL조건을 아래와 같이변환시킨다.
+    * e.salary > 2600 AND e.salary >4400 AND e.salary > 13000
+  * 2단계변환 :
+    * 3개의 조건이 AND로 연결되어 있으므로 제일 큰 값인 e.salary > 13000 조건만 만족하면 나머지 2개의 조건도 만족한다. 따라서 e.salary > 13000조건만 남게 된다.
+    * 이런 기능을 Filter Subsumtion이라고 한다.
+    * 이와같이 Query Transformer는 매우 지능적이어서 All조건을 And조건으로 바꾼다음 모든 조건을 만족하는 집합인 e.SALARY > 13000집합만을 Access 하는 SQL을 만들게 되는 것이다.
 
+</br>
 
+#### IN 연산자를 OR로 변환
+```sql
+explain plan for
+SELECT e.employee_id, e.first_name, e.last_name, e.email
+  FROM employee e, department d
+ WHERE e.department_id = d.department_id
+   AND e.department_id IN (10, 20);
 
+select * from table(dbms_xplan.display);
+---------------------------------------------------------------------------------------------------
+| Id  | Operation                     | Name              | Rows  | Bytes | Cost (%CPU)| Time     |
+---------------------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT              |                   |     3 |    99 |     1 (100)| 00:00:01 |
+|   1 |  NESTED LOOPS                 |                   |     3 |    99 |     0   (0)| 00:00:01 |
+|   2 |   INLIST ITERATOR             |                   |       |       |            |          |
+|   3 |    TABLE ACCESS BY INDEX ROWID| EMPLOYEE          |     3 |    90 |     0   (0)| 00:00:01 |
+|*  4 |     INDEX RANGE SCAN          | EMP_DEPARTMENT_IX |     3 |       |     0   (0)| 00:00:01 |
+|*  5 |   INDEX UNIQUE SCAN           | DEPT_ID_PK        |     1 |     3 |     0   (0)| 00:00:01 |
+---------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+4 - access("E"."DEPARTMENT_ID"=10 OR "E"."DEPARTMENT_ID"=20)
+5 - access("E"."DEPARTMENT_ID"="D"."DEPARTMENT_ID")
+filter("D"."DEPARTMENT_ID"=10 OR "D"."DEPARTMENT_ID"=20)
+```
+* IN을 OR 조건으로 바꾸었음을 알 수 있다
+* Transitive Predicale 기능에 의해서 (D.DEPARTMENT_ID=10 OR D.DEPARTMENT_ID=20) 조건이 추가로 생성
+
+</br>
+
+#### ANY 연산자를 OR로 변환
+```sql
+e.salary > ANY (2600, 4400, 13000) 
+--> (e.salary > 2600 OR e.salary > 4400 OR e.salary > 13000)
+```
+
+</br>
+
+#### NOT연산자를 제거
+```sql
+not (e.salary <> 13000 or e.department_id is null)
+--> e.salary = 13000 AND e.department_id IS NOT NULL
+```
