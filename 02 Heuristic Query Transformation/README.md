@@ -1684,3 +1684,123 @@ e.salary > ANY (2600, 4400, 13000)
 not (e.salary <> 13000 or e.department_id is null)
 --> e.salary = 13000 AND e.department_id IS NOT NULL
 ```
+
+</br>
+
+## 2.15 PM(Predicate Move Around)
+#### Where 조건을 다른 뷰에 이동시켜라
+* PM : 조건절을 다른 뷰 혹은 인라인뷰에 Copy하는 기능
+* 인라인뷰가 여러개있고 각각의 Where절에 공통적인 조건들이 있어야 한다고 가정. 이런경우 모든 인라인뷰의 Where 절에 똑같은 조건들을 반복해서 사용해야 할까?
+
+```sql
+CREATE INDEX DEPT_IX_01 ON department(department_id, location_id);
+
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1';
+
+SELECT /*+ gather_plan_statistics qb_name (v_outer) */
+       v1.*
+  FROM (SELECT /*+ qb_name (IV1) no_merge */             --QB_NAME 힌트를 통해 부여한 별명을 통해 정확하게 어떤 Operation이 
+               e1.*,                                       SQL Text의 어느 부분과 연결되어 있는지  직관적으로 파악
+               d1.location_id
+          FROM employee e1,
+               department d1
+         WHERE e1.department_id = d1.department_id
+           AND d1.department_id = 30
+        ) v1,
+       (SELECT   /*+ qb_name (IV2) no_merge */
+                 AVG (salary) avg_sal_dept,
+                 d2.department_id
+            FROM employee e2,
+                 department d2,
+                 location l2
+           WHERE e2.department_id = d2.department_id
+             AND l2.location_id = d2.location_id
+        GROUP BY d2.department_id
+       ) v2_dept
+ WHERE v1.department_id = v2_dept.department_id              
+   AND v1.salary > v2_dept.avg_sal_dept ;
+                                                           --인라인뷰 V1에 de.department_id = 30이라는 조건이 있지만 V2에는 없다.
+                                                           --PM기능으로 V1의 조건이 V2로 파고들어야한다.
+
+ALTER SESSION SET EVENTS '10053 trace name context forever, level 1';
+
+DROP INDEX DEPT_IX_01;
+
+============
+Plan Table
+============
+-------------------------------------------------------------+-----------------------------------+
+| Id  | Operation                         | Name             | Rows  | Bytes | Cost  | Time      |
+-------------------------------------------------------------+-----------------------------------+
+| 0   | SELECT STATEMENT                  |                  |       |       |     1 |           |
+| 1   |  HASH JOIN                        |                  |     1 |   174 |     1 |  00:00:01 |
+| 2   |   VIEW                            |                  |     1 |    26 |     1 |  00:00:01 |
+| 3   |    HASH GROUP BY                  |                  |     1 |    15 |     0 |           |
+| 4   |     NESTED LOOPS                  |                  |     6 |    90 |     0 |           |
+| 5   |      NESTED LOOPS                 |                  |     1 |     8 |     0 |           |
+| 6   |       TABLE ACCESS BY INDEX ROWID | DEPARTMENT       |     1 |     5 |     0 |           |
+| 7   |        INDEX UNIQUE SCAN          | DEPT_ID_PK       |     1 |       |     0 |           |
+| 8   |       INDEX UNIQUE SCAN           | LOC_ID_PK        |    23 |    69 |     0 |           |
+| 9   |      TABLE ACCESS BY INDEX ROWID  | EMPLOYEE         |     6 |    42 |     0 |           |
+| 10  |       INDEX RANGE SCAN            | EMP_DEPARTMENT_IX|     6 |       |     0 |           |
+| 11  |   VIEW                            |                  |     6 |   888 |     1 |  00:00:01 |
+| 12  |    NESTED LOOPS                   |                  |     6 |   456 |     0 |           |
+| 13  |     TABLE ACCESS BY INDEX ROWID   | DEPARTMENT       |     1 |     5 |     0 |           |
+| 14  |      INDEX UNIQUE SCAN            | DEPT_ID_PK       |     1 |       |     0 |           |
+| 15  |     TABLE ACCESS BY INDEX ROWID   | EMPLOYEE         |     6 |   426 |     0 |           |
+| 16  |      INDEX RANGE SCAN             | EMP_DEPARTMENT_IX|     6 |       |     0 |           |
+-------------------------------------------------------------+-----------------------------------+
+Predicate Information:
+----------------------
+1 - access("V1"."DEPARTMENT_ID"="V2_DEPT"."DEPARTMENT_ID")
+1 - filter("V1"."SALARY">"V2_DEPT"."AVG_SAL_DEPT")
+7 - access("D2"."DEPARTMENT_ID"=30)                          --V2로 조건이 파고들어갔다.
+8 - access("L2"."LOCATION_ID"="D2"."LOCATION_ID")
+10 - access("E2"."DEPARTMENT_ID"=30)                         --V2로 조건이 파고들어갔다.
+14 - access("D1"."DEPARTMENT_ID"=30)
+16 - access("E1"."DEPARTMENT_ID"=30)
+
+ SELECT /*+ QB_NAME ("V_OUTER") */
+        "V1".*
+ FROM  (SELECT /*+ NO_MERGE QB_NAME ("IV1") */
+        "E1".*,"D1"."LOCATION_ID" "LOCATION_ID"
+        FROM "TLO"."EMPLOYEE" "E1",
+             "TLO"."DEPARTMENT" "D1"
+        WHERE "E1"."DEPARTMENT_ID"=30 AND "D1"."DEPARTMENT_ID"=30) "V1",
+       (SELECT /*+ NO_MERGE QB_NAME ("IV2") */
+               AVG("E2"."SALARY") "AVG_SAL_DEPT",
+               "D2"."DEPARTMENT_ID" "DEPARTMENT_ID"
+        FROM "TLO"."EMPLOYEE" "E2",
+        "TLO"."DEPARTMENT" "D2",
+        "TLO"."LOCATION" "L2"
+        WHERE "E2"."DEPARTMENT_ID"=30                        --V2로 조건이 파고들어갔다.
+        AND "L2"."LOCATION_ID"="D2"."LOCATION_ID"
+        AND "D2"."DEPARTMENT_ID"=30                          --V2로 조건이 파고들어갔다.
+        GROUP BY "D2"."DEPARTMENT_ID") "V2_DEPT"
+ WHERE "V1"."DEPARTMENT_ID"="V2_DEPT"."DEPARTMENT_ID"
+ AND "V1"."SALARY">"V2_DEPT"."AVG_SAL_DEPT"
+```
+
+</br>
+
+#### 10053 trace
+```sql
+**************************
+Predicate Move-Around (PM)
+**************************
+PM:   Passed validity checks.                                --먼저 PM이 수행될 수 있는지 검사
+PM: Added transitive pred "E1"."DEPARTMENT_ID"=30
+ in query block IV1 (#2)
+PM:   Pulled up predicate "V1"."DEPARTMENT_ID"=30            --V1에서 WHERE 조건 d1.department_id = 30을 바깥쪽 메인 쿼리로 이동시킨다.
+ from query block IV1 (#2) to query block V_OUTER (#1)         (Predicate Pulled up)
+PM: Added transitive pred "V2_DEPT"."DEPARTMENT_ID"=30
+ in query block V_OUTER (#1)
+PM:   Pushed down predicate "D2"."DEPARTMENT_ID"=30          --메인 쿼리로 옮겨진 Whee 조건을 v2에 복사한다.
+ from query block V_OUTER (#1) to query block IV2 (#3)         (Predicate Pushed down)
+PM:     PM bypassed: checking.                               --최종 결과에서 중복된 조건절이 존재하면 삭제한다.
+```
+* PM이 발생되는 조건
+1. 뷰(혹은 인라인뷰)가 1개 혹은 그 이상 존재해야한다.(ex V1, V2)
+2. 인라인뷰내에 특정 조건이 존재하고 뷰의 바깥쪽에서 특정 조건을 사용한 컬럼으로 조인이 발생해야 한다.
+3. VIEW MERGE가 발생하지 않아야 한다.
+4. 파라미터 _PRED_MOVE_AROUND가 True로 지정이 되어 있어야 한다.
