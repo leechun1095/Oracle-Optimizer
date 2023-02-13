@@ -1804,3 +1804,114 @@ PM:     PM bypassed: checking.                               --최종 결과에�
 2. 인라인뷰내에 특정 조건이 존재하고 뷰의 바깥쪽에서 특정 조건을 사용한 컬럼으로 조인이 발생해야 한다.
 3. VIEW MERGE가 발생하지 않아야 한다.
 4. 파라미터 _PRED_MOVE_AROUND가 True로 지정이 되어 있어야 한다.
+
+</br>
+
+## 2.16 WCOTR* (Where Current Of To Rowid)
+#### Where Current Of를 사용하여 Index Scan
+* PRO* C나 PL/SQL에서 많은 양의 데이터를 Cursor For Loop로 선언한 후 건건이 Update/Delete등을 처리하는 경우가 많이 있다.
+* 개발자들이 일반적으로 Cusor For Loop내에서 아직도 PK인덱스나 Unique 인덱스를 사용하여 DML문을 실행하고 있다.
+* 이럴때 WOORT을 사용하면 인덱스 Access단계를 제거할 수 있다.
+
+#### 0. 테스트용 테이블 빛 인덱스 생성
+```sql
+CREATE TABLE t1 AS
+WITH generator AS ( SELECT /*+ materialize */  ROWNUM AS ID
+                      FROM all_objects
+                     WHERE ROWNUM <= 3000  )
+SELECT /*+ ORDERED USE_NL(v2) */
+       10000 + ROWNUM                      ID,
+       TRUNC(DBMS_RANDOM.VALUE(0,5000))  n1,
+       ROWNUM                              score,
+       RPAD('x',1000)                      probe_padding
+  FROM generator    v1,
+       generator    v2
+ WHERE ROWNUM <= 100000;                                 --> t1 테이블 생성(10만 건)
+
+ALTER TABLE t1 ADD CONSTRAINT t1_pk PRIMARY KEY(ID);     --> id 에 PK 인덱스를 생성함.
+
+EXEC dbms_stats.gather_table_stats(user, 'T1', cascade => true);
+```
+
+#### 1. Cusor For Loop를 사용한 가장흔하게 볼수있는 PL/SQL 패턴
+```sql
+DECLARE
+   CURSOR c IS
+SELECT *
+        FROM t1
+      FOR UPDATE;
+BEGIN
+   FOR rec IN c
+   LOOP
+      UPDATE /*+ pk_index_test */t1   --> 10만 번 PK 인덱스를 사용하여 UPDATE
+         SET score = score + 0
+       WHERE ID = rec.ID;
+   END LOOP;
+
+   COMMIT;
+END; --55.24 sec
+```
+* 위 PL/SQL의 ELAPSED TIME은 11.80초이며 이 수치는 10번을 싱행하여 평균값을 취한것.
+
+#### 2. SOLUTION
+```sql
+DECLARE
+   CURSOR c IS
+      SELECT     *
+       FROM t1
+      FOR UPDATE;
+BEGIN
+   FOR rec IN c
+   LOOP
+      UPDATE /*+ current_of_test */ t1 --> 10만 번 current of를 사용하여 UPDATE
+         SET score = score + 0
+       WHERE CURRENT OF c;
+   END LOOP;
+
+   COMMIT;
+END;--45.27 sec
+```
+* 위 PL/SQL의 ELAPSED TIME은 10.80초이며 이 수치 또한 10번싱행한 평균값
+* PK인덱스를 이용한 UPDATE보다 Current of를사용한 UPDATE가 10%정도 빠름
+
+#### 10%차이 확인
+```sql
+SQL> SELECT sql_text
+  FROM v$sqlarea
+ WHERE sql_text LIKE '%current_of_test%';
+
+SQL_TEXT
+--------------------------------------------------------------------------
+UPDATE /*+ current_of_test */ T1 SET SCORE = SCORE + 0 WHERE ROWID = :B1    -->ROWID를 이용하여 Access
+```
+* WHERE CURRENT OF를 WHERE ROWID=로 변환하는작업은 Oracle Transgormer가 변환한 것이아니다.
+* Transformer가 변환한 SQL은 절대 v$sqlarea에 나타나지 않는다.
+* Parsing 이전 단계에서 SQL을 변환한 것이다.
+* 이것은 PL/SQL이나 PRO*C의 컴파일러가 SQL을 수정한 것이다.
+* 10046이벤트를 이용해도 마찬가지로 미리 변환된 SQL을 볼 수 있다.
+* 일반적인 경우 Transformer가 변환한 SQL은 10053 Trace의 Unparsed Query에서만 볼 수 있다.
+
+#### FOR UPDATE가 없는 커서
+* 주의할점: WHERE CURRENT OF를 사용하려면 MAIN Cursor가 반드시 SELECT FOR UPDATE 문이어야 한다.
+* 하지만 FOR UPDATE가 없는 커서에서도 아래처럼 사용하면 같은 효과를 누릴 수 있다
+```sql
+DECLARE
+   CURSOR c IS
+      SELECT t1.ROWID, t1.*
+        FROM t1;
+BEGIN
+   FOR rec IN c
+   LOOP
+      UPDATE /*+ rowid_test */t1
+         SET score = score + 0
+       WHERE ROWID = rec.ROWID;
+   END LOOP;
+
+   COMMIT;
+END;
+```
+
+
+
+
+
