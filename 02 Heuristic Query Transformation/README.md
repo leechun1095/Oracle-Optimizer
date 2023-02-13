@@ -1884,7 +1884,7 @@ SQL_TEXT
 --------------------------------------------------------------------------
 UPDATE /*+ current_of_test */ T1 SET SCORE = SCORE + 0 WHERE ROWID = :B1    -->ROWID를 이용하여 Access
 ```
-* WHERE CURRENT OF를 WHERE ROWID=로 변환하는작업은 Oracle Transgormer가 변환한 것이아니다.
+* WHERE CURRENT OF를 WHERE ROWID=로 변환하는작업은 Oracle Transformer가 변환한 것이아니다.
 * Transformer가 변환한 SQL은 절대 v$sqlarea에 나타나지 않는다.
 * Parsing 이전 단계에서 SQL을 변환한 것이다.
 * 이것은 PL/SQL이나 PRO*C의 컴파일러가 SQL을 수정한 것이다.
